@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plant-disease-federated-learning"
+version = "1.0.0"
+description = "Plant Disease Detection using Federated Learning and ResNet18"
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]==1.44.0",
+    "torch==2.15.0+cu132",
+    "torchvision==0.29.2+cu132",
+    "numpy"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.flwr.app]
+publisher = "farhan"
+
+[tool.flwr.app.components]
+serverapp = "backend.server.server_app:app"
+clientapp = "backend.clients.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 5
+local-epochs = 1
+batch-size = 16
+learning-rate = 0.001
+
+
+#######################################################################
+# CONFIGURATION MIGRATION NOTICE:
+#
+# What was previously called "federation config" for SuperLink
+# connections in pyproject.toml has been renamed and moved.
+#
+# These settings are now **SuperLink connection configuration**
+# and are defined in the Flower configuration file.
+#
+# The entries below are commented out intentionally and are kept
+# only as a migration reference.
+#
+# Docs: https://flower.ai/docs/framework/ref-flower-configuration.html
+#######################################################################
+
+# [tool.flwr.federations]
+# default = "local-simulation"
+
+# [tool.flwr.federations.local-simulation]
+# options.num-supernodes = 3
+# options.backend.client-resources.num-cpus = 2
+# options.backend.client-resources.num-gpus = 1.0
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
