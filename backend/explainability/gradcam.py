@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -6,17 +7,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from torch.utils.data import Subset
-from backend.config.config import (
-    DEVICE,
-    CHECKPOINT_DIR,
-    RESULTS_DIR,
-    NUM_CLIENTS
-)
+from pathlib import Path
+
+from backend.config.config import DEVICE, RESULTS_DIR, NUM_CLIENTS
 from backend.models.cnn_model import PlantDiseaseModel
 from backend.data.dataset_loader import load_dataset
 from backend.data.preprocessing import get_train_transforms
 from backend.data.data_distribution import distribute_data
+
+
+# Fair experiment checkpoint directory
+FAIR_CHECKPOINT_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "checkpoints"
+    / "fair_comparison"
+)
 
 
 class GradCAM:
@@ -24,16 +29,16 @@ class GradCAM:
     def __init__(self, model, target_layer):
 
         self.model = model
-        self.target_layer = target_layer
-
         self.activations = None
         self.gradients = None
 
-        self.target_layer.register_forward_hook(
+        self.target_layer = target_layer
+
+        self.hook = target_layer.register_forward_hook(
             self.save_activations
         )
 
-    def save_activations(self, module, input, output):
+    def save_activations(self, module, inputs, output):
 
         self.activations = output
 
@@ -45,34 +50,29 @@ class GradCAM:
 
     def generate(self, image, target_class):
 
-        self.model.zero_grad()
+        self.model.zero_grad(set_to_none=True)
 
-        # Forward pass
-        output = self.model(image)
+        with torch.enable_grad():
 
-        # Get score for the selected class
-        score = output[:, target_class]
+            output = self.model(image)
 
-        # Backward pass
-        score.backward()
+            score = output[:, target_class].sum()
 
-        # Calculate channel-wise importance weights
+            score.backward()
+
         weights = torch.mean(
             self.gradients,
             dim=(2, 3),
             keepdim=True
         )
 
-        # Weighted combination of feature maps
         cam = torch.sum(
             weights * self.activations,
             dim=1
         )
 
-        # Remove negative activations
         cam = F.relu(cam)
 
-        # Resize heatmap to original image dimensions
         cam = F.interpolate(
             cam.unsqueeze(1),
             size=image.shape[2:],
@@ -80,75 +80,110 @@ class GradCAM:
             align_corners=False
         )
 
-        cam = cam.squeeze()
+        cam = cam.squeeze().detach().cpu().numpy()
 
-        cam = cam.detach().cpu().numpy()
-
-        # Normalize heatmap
         cam = cam - np.min(cam)
 
         if np.max(cam) > 0:
             cam = cam / np.max(cam)
 
         return cam
-def load_client_model(client_id, num_classes):
 
-    print(f"\nLoading Client {client_id} Model...")
+    def close(self):
+
+        self.hook.remove()
+
+
+def load_model(method, num_classes, client_id=0):
 
     model = PlantDiseaseModel(num_classes=num_classes)
 
-    shared_path = CHECKPOINT_DIR / "fedbn_shared_parameters.pth"
+    if method == "fedavg":
 
-    bn_path = CHECKPOINT_DIR / f"fedbn_client_{client_id}_bn.pth"
+        checkpoint_path = (
+            FAIR_CHECKPOINT_DIR
+            / "fedavg"
+            / "fedavg_final_model.pth"
+        )
 
-    shared_state = torch.load(
-        shared_path,
-        map_location=DEVICE
-    )
+        state_dict = torch.load(
+            checkpoint_path,
+            map_location=DEVICE
+        )
 
-    bn_state = torch.load(
-        bn_path,
-        map_location=DEVICE
-    )
+        model.load_state_dict(state_dict)
 
-    model_state = model.state_dict()
+    elif method == "fedbn":
 
-    model_state.update(shared_state)
-    model_state.update(bn_state)
+        if client_id < 0 or client_id >= NUM_CLIENTS:
+            raise ValueError("Invalid FedBN client ID.")
 
-    model.load_state_dict(model_state)
+        shared_path = (
+            FAIR_CHECKPOINT_DIR
+            / "fedbn"
+            / "fedbn_final_shared_parameters.pth"
+        )
+
+        bn_path = (
+            FAIR_CHECKPOINT_DIR
+            / "fedbn"
+            / f"fedbn_client_{client_id}_bn.pth"
+        )
+
+        shared_state = torch.load(
+            shared_path,
+            map_location=DEVICE
+        )
+
+        bn_state = torch.load(
+            bn_path,
+            map_location=DEVICE
+        )
+
+        model_state = model.state_dict()
+
+        model_state.update(shared_state)
+        model_state.update(bn_state)
+
+        model.load_state_dict(model_state)
+
+    else:
+
+        raise ValueError(
+            "Method must be either 'fedavg' or 'fedbn'."
+        )
 
     model.to(DEVICE)
     model.eval()
 
-    print("Client Model Loaded Successfully!")
+    print(f"{method.upper()} model loaded successfully!")
 
     return model
 
 
-def generate_gradcam(client_id=0, test_index=0):
+def generate_gradcam(method="fedavg", client_id=0, test_index=20):
 
     print("\nStarting Grad-CAM...")
 
-    # Load dataset
     dataset = load_dataset(
         transform=get_train_transforms()
     )
 
     class_names = dataset.classes
 
-    # Recreate the same train-test split
     _, test_dataset = distribute_data(
         dataset,
         test_ratio=0.2,
         seed=42
     )
 
-    # Divide test data among clients
     total_size = len(test_dataset)
 
     base_size = total_size // NUM_CLIENTS
     remainder = total_size % NUM_CLIENTS
+
+    if client_id < 0 or client_id >= NUM_CLIENTS:
+        raise ValueError("Invalid client ID.")
 
     client_size = base_size + (
         1 if client_id < remainder else 0
@@ -161,83 +196,88 @@ def generate_gradcam(client_id=0, test_index=0):
             f"test_index must be between 0 and {client_size - 1}"
         )
 
-    client_test_indices = list(
-        range(start, start + client_size)
-    )
+    selected_index = start + test_index
 
-    client_test_dataset = Subset(
-        test_dataset,
-        client_test_indices
-    )
-
-    # Get selected image
-    image, true_label = client_test_dataset[test_index]
+    image, true_label = test_dataset[selected_index]
 
     image = image.unsqueeze(0).to(DEVICE)
 
-    # Load personalized FedBN model
-    model = load_client_model(
-        client_id,
-        len(class_names)
+    model = load_model(
+        method,
+        len(class_names),
+        client_id
     )
 
-    # Make prediction
-    # Get prediction and class probabilities
+    # Prediction
     with torch.no_grad():
+
         outputs = model(image)
 
         probabilities = torch.softmax(outputs, dim=1)
 
         prediction = outputs.argmax(dim=1).item()
 
-        true_probability = probabilities[0][true_label].item()
         predicted_probability = probabilities[0][prediction].item()
 
-        # Get top 5 predictions
+        true_probability = probabilities[0][true_label].item()
+
         top_probabilities, top_indices = torch.topk(
-            probabilities[0], k=5
+            probabilities[0],
+            k=5
         )
 
     print("\n========== PREDICTION ANALYSIS ==========")
 
-    print("True Class:", dataset.classes[true_label])
-    print("Predicted Class:", dataset.classes[prediction])
+    print("Method:", method.upper())
+    print("Client ID:", client_id)
+    print("True Class:", class_names[true_label])
+    print("Predicted Class:", class_names[prediction])
 
-    print(f"True Class Probability: {true_probability * 100:.2f}%")
-    print(f"Predicted Class Probability: {predicted_probability * 100:.2f}%")
+    print(
+        f"Predicted Confidence: "
+        f"{predicted_probability * 100:.2f}%"
+    )
+
+    print(
+        f"True Class Probability: "
+        f"{true_probability * 100:.2f}%"
+    )
 
     print("\nTop 5 Predictions:")
 
-    for probability, class_index in zip(top_probabilities, top_indices):
+    for probability, class_index in zip(
+        top_probabilities,
+        top_indices
+    ):
+
         print(
-            f"{dataset.classes[class_index.item()]}: "
+            f"{class_names[class_index.item()]}: "
             f"{probability.item() * 100:.2f}%"
         )
 
-    print("=========================================\n")
+    print("=========================================")
 
-    # Initialize Grad-CAM
-    target_layer = model.model.layer3[-1]
+    # Grad-CAM
+    target_layer = model.model.layer4[-1]
 
     gradcam = GradCAM(
         model,
         target_layer
     )
 
-    # Generate heatmap for predicted class
-    # Generate Grad-CAM for predicted class
     predicted_heatmap = gradcam.generate(
         image,
-        target_class=prediction
+        prediction
     )
 
-    # Generate Grad-CAM for true class
     true_heatmap = gradcam.generate(
         image,
-        target_class=true_label
+        true_label
     )
 
-    # Convert normalized image back to display format
+    gradcam.close()
+
+    # Restore original image
     original_image = image.squeeze(0).detach().cpu()
 
     mean = torch.tensor(
@@ -261,9 +301,7 @@ def generate_gradcam(client_id=0, test_index=0):
     )
 
     # Save visualization
-    # Save comparison visualization
-
-    output_dir = RESULTS_DIR / "gradcam"
+    output_dir = RESULTS_DIR / "fair_comparison" / "gradcam"
 
     output_dir.mkdir(
         parents=True,
@@ -271,11 +309,11 @@ def generate_gradcam(client_id=0, test_index=0):
     )
 
     fig, axes = plt.subplots(
-        1, 3,
+        1,
+        3,
         figsize=(18, 6)
     )
 
-    # Original image
     axes[0].imshow(original_image)
 
     axes[0].set_title(
@@ -284,7 +322,6 @@ def generate_gradcam(client_id=0, test_index=0):
 
     axes[0].axis("off")
 
-    # Predicted class Grad-CAM
     axes[1].imshow(original_image)
 
     axes[1].imshow(
@@ -294,12 +331,11 @@ def generate_gradcam(client_id=0, test_index=0):
     )
 
     axes[1].set_title(
-        f"Predicted Class Grad-CAM\n{class_names[prediction]}"
+        f"{method.upper()} Predicted Grad-CAM\n"
+        f"{class_names[prediction]}"
     )
 
     axes[1].axis("off")
-
-    # True class Grad-CAM
     axes[2].imshow(original_image)
 
     axes[2].imshow(
@@ -317,7 +353,7 @@ def generate_gradcam(client_id=0, test_index=0):
     plt.tight_layout()
 
     output_path = output_dir / (
-        f"client_{client_id}_image_{test_index}_comparison.png"
+        f"{method}_client_{client_id}_image_{test_index}.png"
     )
 
     plt.savefig(
@@ -328,12 +364,35 @@ def generate_gradcam(client_id=0, test_index=0):
 
     plt.close()
 
-    print("\nComparison Visualization Saved:", output_path)
+    print("\nGrad-CAM visualization saved:", output_path)
 
 
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--method",
+        choices=["fedavg", "fedbn"],
+        default="fedavg"
+    )
+
+    parser.add_argument(
+        "--client",
+        type=int,
+        default=0
+    )
+
+    parser.add_argument(
+        "--index",
+        type=int,
+        default=20
+    )
+
+    args = parser.parse_args()
+
     generate_gradcam(
-        client_id=0,
-        test_index=20
+        method=args.method,
+        client_id=args.client,
+        test_index=args.index
     )
