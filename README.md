@@ -53,7 +53,7 @@ Federated Averaging trains models locally on individual clients and aggregates t
 
 Federated Batch Normalization keeps Batch Normalization parameters local to each client while aggregating the remaining model parameters.
 
-Both algorithms use the same initial model, dataset split, training configuration, and evaluation dataset for a fair comparison.
+Both algorithms use the same initial model, dataset split, training partitions, training configuration, and evaluation dataset for a fair comparison.
 
 ## 5. Experimental Configuration
 
@@ -119,9 +119,11 @@ Plant-Disease-Detection-Federated-Learning/
 │   └── app.py
 │
 ├── checkpoints/
+│   └── fair_comparison/
+│       ├── fedavg/
+│       └── fedbn/
 │
 ├── results/
-│
 ├── backups/
 │
 ├── main.py
@@ -165,7 +167,138 @@ pip install -r requirements.txt
 
 ### Step 4: Prepare the Dataset
 
-Download the PlantVillage dataset and place its class folders inside:
+Download the PlantVillage dataset and place its 15 class folders inside:
 
 ```text
-dataset/raw
+dataset/raw/PlantVillage/
+```
+
+The directory should contain the 15 plant disease class folders.
+
+### Step 5: Download Pretrained Models
+
+The trained model checkpoints are available on Google Drive.
+
+**[Download Pretrained Models](https://drive.google.com/file/d/1qbWozuwNWW0BHO3fT7lsCs1JsLFnPPfR/view?usp=drive_link)**
+
+Download the ZIP file and extract it.
+
+The extracted ZIP contains two folders: `fedavg` and `fedbn`.
+
+Copy these two folders into:
+
+```text
+checkpoints/fair_comparison/
+```
+
+The final checkpoint structure should look like this:
+
+```text
+checkpoints/
+└── fair_comparison/
+    ├── fedavg/
+    │   └── fedavg_final_model.pth
+    │
+    └── fedbn/
+        ├── fedbn_final_shared_parameters.pth
+        ├── fedbn_client_0_bn.pth
+        ├── fedbn_client_1_bn.pth
+        └── fedbn_client_2_bn.pth
+```
+
+These pretrained checkpoints allow you to use the trained models without running the federated training experiments again.
+
+## 9. Running the Federated Learning Experiments
+
+To run the FedAvg experiment:
+
+```bash
+flwr build --app experiments/fedavg
+```
+
+```bash
+flwr run experiments/fedavg --stream
+```
+
+To run the FedBN experiment:
+
+```bash
+flwr build --app experiments/fedbn
+```
+
+```bash
+flwr run experiments/fedbn --stream
+```
+
+**Note:** Running these commands trains the models again. You do not need to run them just to use the pretrained models.
+
+## 10. Model Evaluation
+
+Generate the classification reports:
+
+```bash
+python -m backend.evaluation.fair_comparison_classification_report
+```
+
+Generate evaluation visualizations:
+
+```bash
+python -m backend.evaluation.fair_comparison_visualizations
+```
+
+The evaluation includes:
+
+- Classification reports
+- Precision, recall, and F1-score
+- Confusion matrices
+- Performance comparisons
+
+## 11. Grad-CAM Explainability
+
+Grad-CAM (Gradient-weighted Class Activation Mapping) is implemented to visualize the important image regions influencing the model's predictions.
+
+It helps users understand which parts of a leaf image contribute to a disease classification.
+
+Grad-CAM is available for both FedAvg and FedBN models.
+
+## 12. Running the Web Application
+
+Start the Streamlit application:
+
+```bash
+streamlit run frontend/app.py
+```
+
+The application provides:
+
+- Plant disease prediction using FedAvg and FedBN.
+- Model performance comparison.
+- Classification reports.
+- Confusion matrices.
+- Grad-CAM visualizations.
+
+## 13. Future Improvements
+
+- Evaluate different data distributions across clients.
+- Experiment with additional federated learning algorithms.
+- Improve model generalization.
+- Explore larger image resolutions and data augmentation.
+- Extend the system to real-world distributed clients.
+
+## 14. Author
+
+**Farhan Hussain**
+
+B.Tech – Artificial Intelligence and Machine Learning
+
+GitHub: https://github.com/farhanhussain1265-alt
+
+LinkedIn: https://linkedin.com/in/farhanhussain-ai
+
+---
+
+**Project:** Plant Disease Detection Using Federated Learning
+
+**Framework:** PyTorch + Flower
+
+**Interface:** Streamlit
